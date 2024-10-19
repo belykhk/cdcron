@@ -1,0 +1,45 @@
+services:
+
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: consul-server
+    restart: always
+    ports:
+      - "8501:8500"
+    command:
+      - agent
+      - -server
+      - -node=server
+      - -bootstrap-expect=1
+      - -ui
+      - -client=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8500/v1/status/leader"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+
+  consul-client:
+    image: hashicorp/consul:latest
+    container_name: consul-client
+    restart: always
+    ports:
+      - "8500:8500"
+    command:
+      - agent
+      - -node=client
+      - -ui
+      - -retry-join=consul-server
+      - -client=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8500/v1/status/leader"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+    depends_on:
+      consul-server:
+        condition: service_healthy
