@@ -32,17 +32,8 @@ class Consul:
         )
         self.healthcheck_port = int(os.getenv("HEALTHCHECK_PORT", 8080))
 
+        self.is_leader = False
         self.start_consul()
-
-        # # Startup registration.
-        # # Deregistration is needed to delete old instance in case we moved it
-        # self.register_service()
-        # atexit.register(self.cleanup)
-        # self.create_session()
-
-        # # Start the election and registration check threads
-        # self.start_election()
-        # self.start_registration_check()
 
     def _get_headers(self):
         """Function to simplify work with consul_token"""
@@ -58,29 +49,31 @@ class Consul:
         # Internal state machine
         self.registered = threading.Event()
         self.session_id = None
+        self.election_key = f"service/{self.service_name}/leader"
 
         atexit.register(self.cleanup)
         self.deregister_service()
 
         # Registration
-        registration_thread = threading.Thread(
-            target=self.run_registration, daemon=True
-        )
+        registration_thread = threading.Thread(target=self.run_registration, daemon=True)
         registration_thread.start()
         while not self.registered.is_set():
             pass  # Wait until registration complete to continue
 
         # Session
-        session_thread = threading.Thread(
-            target=self.run_session_management, daemon=True
-        )
+        session_thread = threading.Thread(target=self.run_session_management, daemon=True)
         session_thread.start()
         while not self.session_id:
             pass  # Wait until we get session to continue
 
+        # Election
+        election_thread = threading.Thread(target=self.run_election, daemon=True)
+        election_thread.start()
+
     def cleanup(self):
         """Handler of all exit code for clean shutdown"""
         logger.info("stopping consul client...")
+        self.release_lock()
         self.deregister_service()
 
     def run_registration(self):
@@ -107,9 +100,7 @@ class Consul:
             try:
                 response = requests.put(url, data=json.dumps(payload), headers=headers)
                 if response.status_code == 200:
-                    logger.info(
-                        f"service '{self.service_name}' with ID '{self.service_id}' registered successfully."
-                    )
+                    logger.info(f"service '{self.service_name}' with ID '{self.service_id}' registered successfully.")
                     self.registered.set()
                     return True
                 else:
@@ -135,7 +126,8 @@ class Consul:
                         logger.error(f"service registration lost, trying to reregister")
                         _register(self)
                     else:
-                        pass  # Serivce is still registered
+                        logger.debug(f"service is still registered")
+                        pass
                 else:
                     logger.error(
                         f"failed to check service registration, status code: {response.status_code}, message: {str(response.content)}"
@@ -205,6 +197,79 @@ class Consul:
                 time.sleep(5)
                 _renew_session(self)
 
+    def run_election(self):
+        """Thread to run consul election"""
+
+        def _acquire_lock(self):
+            """Acquire lock with current session ID to became leader"""
+            url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?acquire={self.session_id}"
+            headers = self._get_headers()
+            payload = {"leader": self.session_id}
+
+            try:
+                response = requests.put(url, headers=headers, data=json.dumps(payload))
+                if response.status_code == 200 and response.json():
+                    logger.info("lock acquired, this instance is now the leader.")
+                    self.is_leader = True
+                    return True
+                else:
+                    logger.debug("failed to acquire lock, another instance may be the leader.")
+                    return False
+            except Exception as e:
+                logger.error(f"error acquiring lock: {e}")
+                os.exit(1)
+
+        def _update_lock(self):
+            """Update modify index of lock to indicate that leader is alive"""
+
+            url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?index={self._lock_modify_index}"
+            headers = self._get_headers()
+
+            try:
+                response = requests.get(url, headers=headers)
+                if response.status_code == 200 and response.json():
+                    data = response.json()
+                    self._lock_modify_index = data[0].get("ModifyIndex")
+                    logger.debug(f"lock updated, new index is {self._lock_modify_index}")
+                else:
+                    logger.error(f"failed to update lock, status code: {response.status_code}")
+            except Exception as e:
+                logger.error(f"error updating lock: {e}")
+
+        def _watch_lock(self):
+            """Watch the lock key for changes to respond to leader election."""
+            url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?wait=5s"
+            headers = self._get_headers()
+
+            try:
+                response = requests.get(url, headers=headers)
+                if response.status_code == 404:
+                    _acquire_lock(self)
+                elif response.status_code == 200:
+                    data = response.json()
+                    if data and data[0].get("Session") == self.session_id:
+                        _update_lock(self)
+                        logger.debug("still the leader.")
+                    else:
+                        if data[0].get("ModifyIndex") == self._lock_modify_index:
+                            logger.info(f"'ModifyIndex' is not updating, trying to get leadership")
+                            _acquire_lock(self)
+                        else:
+                            self._lock_modify_index = data[0].get("ModifyIndex")
+                            logger.debug("not a leader")
+                else:
+                    logger.error(f"failed to watch lock, status code: {response.status_code}")
+            except Exception as e:
+                logger.error(f"error watching lock: {e}")
+
+        self._lock_modify_index = int()
+        while True:
+            if self.is_leader:
+                time.sleep(5)
+            else:
+                time.sleep(10)
+            _watch_lock(self)
+
     def deregister_service(self):
         """Deregister service with Consul"""
 
@@ -214,13 +279,11 @@ class Consul:
         try:
             response = requests.put(url, headers=headers)
             if response.status_code == 200:
-                logger.info(
-                    f"service with ID '{self.service_id}' deregistered successfully."
-                )
+                logger.info(f"service with ID '{self.service_id}' deregistered successfully.")
                 self.registered.clear()
             elif response.status_code == 404:
+                logger.debug(f"service wasn't registered")
                 self.registered.clear()
-                pass  # There is already no service, no error
             else:
                 logger.error(
                     f"failed to deregister service with ID '{self.service_id}'. Status code: {response.status_code}"
@@ -230,118 +293,27 @@ class Consul:
             logger.error(f"error deregistering service: {e}")
             os._exit(1)
 
-    # def create_session(self):
-    #     """Creates a Consul session for leader election."""
+    def release_lock(self):
+        """Releases the lock if this instance holds it."""
 
-    # # Election
-    # def start_election(self):
-    #     """Start the election process in a non-blocking thread."""
-    #     self.election_thread = threading.Thread(target=self.run_election, daemon=True)
-    #     self.election_thread.start()
+        if not self.session_id:
+            logger.error("no session created, cannot release lock.")
+            return
 
-    #     # Start watching the lock in a separate thread
-    #     watch_thread = threading.Thread(target=self.watch_lock, daemon=True)
-    #     watch_thread.start()
+        url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?release={self.session_id}"
+        headers = self._get_headers()
+        payload = {"leader": self.session_id}
 
-    # def run_election(self):
-    #     """Leader election logic that keeps trying to acquire/maintain leadership."""
-
-    #     while not self.stop_election.is_set():
-    #         if self.acquire_lock():
-    #             # Only renew the session while we hold the lock
-    #             while self.renew_session():
-    #                 time.sleep(10)  # Sleep until the next renewal
-    #                 if self.stop_election.is_set():
-    #                     break
-    #         else:
-    #             time.sleep(5)
-
-    # def watch_lock(self):
-    #     """Watch the lock key for changes to respond to leader election."""
-    #     url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?wait=5s"
-    #     headers = self._get_headers()
-
-    #     while not self.stop_election.is_set():
-    #         try:
-    #             response = requests.get(url, headers=headers)
-    #             if response.status_code == 200:
-    #                 data = response.json()
-    #                 # Check if the lock is held by this instance
-    #                 if data and data[0].get("Session") == self.session_id:
-    #                     logger.debug("still the leader.")
-    #                 else:
-    #                     logger.info("lost leadership, attempting to acquire lock.")
-    #                     self.acquire_lock()  # Attempt to reacquire leadership
-    #             else:
-    #                 logger.error(
-    #                     f"failed to watch lock. Status code: {response.status_code}"
-    #                 )
-    #         except requests.exceptions.Timeout:
-    #             logger.info("Watch request timed out. Trying again...")
-    #         except Exception as e:
-    #             logger.error(f"error watching lock: {e}")
-
-    # def acquire_lock(self):
-    #     """Attempts to acquire a lock to become the leader using the watch feature."""
-
-    #     if not self.session_id:
-    #         logger.error("no session created, cannot acquire lock.")
-    #         return False
-
-    #     url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?acquire={self.session_id}"
-    #     headers = self._get_headers()
-
-    #     try:
-    #         response = requests.put(url, headers=headers)
-    #         if response.status_code == 200 and response.json():
-    #             logger.info("lock acquired, this instance is now the leader.")
-    #             return True
-    #         else:
-    #             logger.debug(
-    #                 "failed to acquire lock, another instance may be the leader."
-    #             )
-    #             return False
-    #     except Exception as e:
-    #         logger.error(f"error acquiring lock: {e}")
-    #         return False
-
-    # # Exit code
-    # def cleanup(self):
-    #     """Graceful cleanup on application exit."""
-
-    #     self.stop_election_process()
-    #     self.release_lock()
-    #     self.deregister_service()
-
-    # def stop_election_process(self):
-    #     """Stop the election thread."""
-
-    #     self.stop_election.set()
-    #     if self.election_thread:
-    #         self.election_thread.join()
-
-    # def release_lock(self):
-    #     """Releases the lock if this instance holds it."""
-
-    #     if not self.session_id:
-    #         logger.error("no session created, cannot release lock.")
-    #         return
-
-    #     url = f"{self.consul_scheme}://{self.consul_hostname}:{self.consul_port}/v1/kv/{self.election_key}?release={self.session_id}"
-    #     headers = self._get_headers()
-
-    #     try:
-    #         response = requests.put(url, headers=headers)
-    #         if response.status_code == 200:
-    #             if str(response.content) == "true":
-    #                 logger.info("lock released successfully.")
-    #             else:
-    #                 logger.info("no lock to release")
-    #         else:
-    #             logger.error(
-    #                 f"failed to release lock. Status code: {response.status_code}"
-    #             )
-    #             os._exit(1)
-    #     except Exception as e:
-    #         logger.error(f"error releasing lock: {e}")
-    #         os._exit(1)
+        try:
+            response = requests.put(url, headers=headers, data=json.dumps(payload))
+            if response.status_code == 200:
+                if response.content == b"true":
+                    logger.info("lock released successfully.")
+                else:
+                    logger.info("no lock to release")
+            else:
+                logger.error(f"failed to release lock. Status code: {response.status_code}")
+                os._exit(1)
+        except Exception as e:
+            logger.error(f"error releasing lock: {e}")
+            os._exit(1)

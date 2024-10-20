@@ -5,3 +5,7 @@ service "cdcron" {
 session "cdcron" {
     policy = "write"
 }
+
+key "service/cdcron/leader" {
+    policy = "write"
+}
