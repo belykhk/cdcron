@@ -3,6 +3,8 @@ import logging
 import consul
 import healthcheck
 
+from cdcron import cdcron
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -16,4 +18,5 @@ healthcheck.HealthCheckServer()
 consul = consul.Consul()
 
 while True:
-    pass
+    while consul.is_leader:
+        cdcron()

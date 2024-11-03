@@ -1,0 +1,63 @@
+[
+    {
+        "method": "GET",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/get",
+        "headers": {
+            "Authorization": "Bearer your_token_here"
+        }
+    },
+    {
+        "method": "POST",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/post",
+        "data": {
+            "key": "value"
+        },
+        "headers": {
+            "Content-Type": "application/json"
+        }
+    },
+    {
+        "method": "PUT",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/put",
+        "data": {
+            "key": "updated_value"
+        },
+        "headers": {
+            "X-Custom-Header": "custom_value"
+        }
+    },
+    {
+        "method": "DELETE",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/delete"
+    },
+    {
+        "method": "PATCH",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/patch",
+        "data": {
+            "key": "patched_value"
+        },
+        "headers": {
+            "Accept": "application/json"
+        }
+    },
+    {
+        "method": "HEAD",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/head"
+    },
+    {
+        "method": "OPTIONS",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/options"
+    },
+    {
+        "method": "TRACE",
+        "cron": "* * * * *",
+        "url": "http://localhost/api/trace"
+    }
+]

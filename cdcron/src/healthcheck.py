@@ -24,9 +24,8 @@ class HealthCheckServer:
         self.server = HTTPServer(("0.0.0.0", self.port), StubRequestHandler)
         self.server_thread = threading.Thread(target=self.server.serve_forever)
         self.server_thread.daemon = True
-        self.start()
-
         atexit.register(self.stop)
+        self.start()
 
     def start(self):
         """Start the server in a separate thread."""

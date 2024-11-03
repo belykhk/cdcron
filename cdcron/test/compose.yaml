@@ -43,3 +43,11 @@ services:
     depends_on:
       consul-server:
         condition: service_healthy
+
+  testapp:
+    build:
+      dockerfile: Dockerfile
+    container_name: testapp
+    restart: always
+    ports:
+    - "80:5000"
